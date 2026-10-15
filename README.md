@@ -63,3 +63,16 @@ GitHub Pages 只负责发布网页文件，浏览器不能直接修改仓库中�
 ## 更新网页
 
 修改 `index.html` 并提交到 `main` 分支后，GitHub Actions 会自动重新部署页面。部署完成后刷新在线地址即可看到更新。
+
+## 在线账号与同步
+
+网页已接入 Supabase：
+
+- 使用邮箱和密码注册、登录、退出
+- 登录后收获记录保存到在线数据库
+- 同一账号可在手机、iOS 和 Windows 浏览器同步
+- 每个账号只能读取和删除自己的记录
+
+首次启用时，在 Supabase 的 SQL Editor 中执行仓库内的 `supabase-schema.sql`。如果 Supabase 开启了邮箱确认，注册后需要先完成邮箱确认，再登录。
+
+Supabase 公开客户端密钥可以放在网页中，但不要把 `service_role` 管理员密钥提交到仓库。
