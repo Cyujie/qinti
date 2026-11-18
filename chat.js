@@ -2,7 +2,27 @@ import { MAX_FILE_SIZE, prepareFile, uploadFile, renderFile } from './chat-media
 const api = 'https://uomgorcvmqodmfnxovri.supabase.co';
 const publishableKey = 'sb_publishable_udvGflXSwMiribxIMmNlew_dZUD3Ng1';
 const el = id => document.getElementById(id);
-const say = value => { el('status').textContent = value; };
+const say = value => { el(active ? 'status' : 'intro').textContent = value; };
+const list = el('messages');
+const options = el('options');
+function nearLatest() {
+  return list.scrollHeight - list.clientHeight - list.scrollTop < 48;
+}
+function scrollToLatest() {
+  list.scrollTop = list.scrollHeight;
+  el('latest').hidden = true;
+}
+el('latest').onclick = scrollToLatest;
+list.addEventListener('scroll', () => { el('latest').hidden = nearLatest(); });
+document.addEventListener('click', e => {
+  if (!options.contains(e.target) || e.target.closest('.menu button')) options.open = false;
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && options.open) {
+    options.open = false;
+    options.querySelector('summary').focus();
+  }
+});
 const hex = data => Array.from(new Uint8Array(data), b => b.toString(16).padStart(2,'0')).join('');
 const random = size => crypto.getRandomValues(new Uint8Array(size));
 const digest = async value => hex(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value)));
@@ -74,7 +94,11 @@ async function refresh(){
   try{
     const {messages,joined}=await rpc('read',{cursor_seq:last});
     if(!isGuest){el('invite').hidden=joined; if(joined)el('copyField').hidden=true;}
-    if(last===0 && !messages.length)say(joined?'双方已连接。':'邀请有效期为 24 小时，首位接受者可加入。');
+    el('roomState').textContent = joined ? '加密对话 · 对方已加入' : '加密对话 · 等待好友加入';
+    if (!last && !messages.length) {
+      el('intro').textContent = joined ? '发送第一条消息' : '复制邀请链接发给好友，24 小时内有效。';
+    }
+    const follow = !last || nearLatest();
     let incoming = false;
     for(const m of messages){
       const item=document.createElement('li');
@@ -90,12 +114,17 @@ async function refresh(){
     }
     if(historyLoaded && incoming)notifyIncoming();
     if(messages.length < 100)historyLoaded=true;
-    if(messages.length){el('messages').scrollTop=el('messages').scrollHeight;say('私聊中');}
+    if(messages.length){
+      el('welcome').hidden = true;
+      if (follow) scrollToLatest();
+      else el('latest').hidden = false;
+    }
   }finally{reading=false;}
 }
 async function openRoom(){
   key=await crypto.subtle.importKey('raw',bits(state.key),'AES-GCM',false,['encrypt','decrypt']);
   active=true; await refresh(); updateNotifyButton(); el('composer').hidden=false;el('join').hidden=true;el('closeRoom').hidden=isGuest;
+  options.hidden = el('notify').hidden && el('closeRoom').hidden;
 }
 function click(id,callback){el(id).onclick=async()=>{el(id).disabled=true;try{await callback();}catch(e){say(e.message);}finally{el(id).disabled=false;}};}
 click('create',async()=>{
@@ -120,14 +149,25 @@ click('closeRoom',async()=>{
 });
 const queue = [];
 const draft = el('draft');
+function sizeDraft(){
+  draft.style.height = 'auto';
+  draft.style.height = draft.scrollHeight + 'px';
+}
+draft.addEventListener('input', sizeDraft);
 function showQueue(){
   el('queued').replaceChildren(...queue.map(entry => {
     const remove = document.createElement('button');
     remove.type = 'button';
-    remove.textContent = entry.file.name + ' ×';
+    if(entry.thumb){
+      const img = document.createElement('img');
+      img.src = entry.thumb;
+      img.alt = '';
+      remove.append(img);
+    }
+    remove.append(entry.file.name + ' ×');
     remove.setAttribute('aria-label', '移除 ' + entry.file.name);
     remove.disabled = el('send').disabled;
-    remove.onclick = () => { queue.splice(queue.indexOf(entry),1); showQueue(); };
+    remove.onclick = () => { queue.splice(queue.indexOf(entry),1); if(entry.thumb)URL.revokeObjectURL(entry.thumb); showQueue(); };
     return remove;
   }));
 }
@@ -136,7 +176,8 @@ function addFiles(files){
   for(const file of files){
     if(!file.size || file.size > MAX_FILE_SIZE){say('文件为空或超过 16 MB：'+file.name);continue;}
     if(queue.length >= 8){say('每次最多选择 8 个附件。');break;}
-    queue.push({file, id:crypto.randomUUID()});
+    const thumb = /^image\/(png|jpeg|webp|gif|avif)$/.test(file.type) ? URL.createObjectURL(file) : null;
+    queue.push({file, thumb, id:crypto.randomUUID()});
   }
   showQueue();
 }
@@ -167,14 +208,15 @@ el('composer').onsubmit=async e=>{
       if(!entry.upload)entry.upload=await prepareFile(entry.file,key);
       await uploadFile(entry.upload,filePart,(part,total)=>say('正在发送 '+entry.file.name+' · '+part+'/'+total));
       await sendPacket(entry.upload.manifest,entry.id);
-      queue.shift();showQueue();
+      queue.shift();if(entry.thumb)URL.revokeObjectURL(entry.thumb);showQueue();
     }
     if(text){
       if(pending?.text!==text)pending={text,id:crypto.randomUUID()};
       await sendPacket(text,pending.id);
       pending=null;draft.value='';
     }
-    await refresh();
+    say('');sizeDraft();
+    await refresh();scrollToLatest();
   }catch(err){say('发送失败：'+err.message+' 可再次点发送。');}
   finally{draft.readOnly=false;el('send').disabled=false;el('attach').disabled=false;showQueue();draft.focus();}
 };
@@ -204,10 +246,12 @@ const hostFrame = window.parent === window || isGuest || new URL(document.referr
   ? null : window.frameElement;
 if(hostFrame){
   document.documentElement.classList.add('embedded');
-  const content=document.querySelector('main');
-  new ResizeObserver(()=>{
-    if(content.offsetHeight)hostFrame.style.height=content.offsetHeight+'px';
-  }).observe(content);
+  const parentRoot = hostFrame.ownerDocument.documentElement;
+  const syncTheme = () => { document.documentElement.dataset.theme = parentRoot.dataset.theme || 'light'; };
+  syncTheme();
+  const observer = new MutationObserver(syncTheme);
+  observer.observe(parentRoot,{attributes:true,attributeFilter:['data-theme']});
+  window.addEventListener('pagehide', event => { if(!event.persisted)observer.disconnect(); });
 }
 start().catch(e=>say(e.message));
 setInterval(()=>{if(notificationsOn() || (!document.hidden && (!hostFrame || hostFrame.getClientRects().length)))refresh().catch(e=>say(e.message));},3000);
