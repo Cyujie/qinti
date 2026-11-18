@@ -1,3 +1,4 @@
+import {makeRecoveryCode,recoveryKey,sealRoom,restoreRoom} from './chat-recovery.js';
 import { MAX_FILE_SIZE, prepareFile, uploadFile, renderFile } from './chat-media.js';
 const api = 'https://uomgorcvmqodmfnxovri.supabase.co';
 const publishableKey = 'sb_publishable_udvGflXSwMiribxIMmNlew_dZUD3Ng1';
@@ -135,6 +136,14 @@ async function openRoom(){
   if(state.group){el('closeRoom').textContent='解散群聊';el('invite').textContent='邀请群成员';}
   active=true; await refresh();el('nickField').hidden=true; updateNotifyButton(); el('composer').hidden=false;el('join').hidden=true;el('closeRoom').hidden=isGuest;
   options.hidden = el('notify').hidden && el('closeRoom').hidden;
+  const savedDraft=sessionStorage.getItem(draftSlot());
+  if(savedDraft && !draft.value){
+    try{
+      const bytes=bits(savedDraft);
+      const clear=await crypto.subtle.decrypt({name:'AES-GCM',iv:bytes.slice(0,12)},key,bytes.slice(12));
+      if(!draft.value){draft.value=new TextDecoder().decode(clear);sizeDraft();}
+    }catch{say('此草稿无法恢复。');}
+  }
 }
 function click(id,callback){el(id).onclick=async()=>{el(id).disabled=true;try{await callback();}catch(e){say(e.message);}finally{el(id).disabled=false;}};}
 // Each room has its own key record. Only the selected room ID is shared across reloads.
@@ -150,34 +159,157 @@ function rememberSelection(id){
   sessionStorage.setItem(storeKey,id);
   localStorage.setItem(storeKey,JSON.stringify({selectedRoom:id}));
 }
-function canLeaveRoom(){
+const draftSlot=()=>storeKey+':draft:'+state.room;
+async function canLeaveRoom(){
   if(el('send').disabled || el('closeRoom').disabled){
     el('directoryStatus').textContent='请等待当前操作完成。';
     return false;
   }
-  return (!draft.value && !queue.length) || confirm('离开后会清空当前未发送的内容，继续吗？');
+  if(queue.length && !confirm('切换后需要重新选择未发送的附件。继续吗？'))return false;
+  if(!state.room || !key)return true;
+  try{
+    if(draft.value){
+      const iv=random(12);
+      const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,new TextEncoder().encode(draft.value));
+      sessionStorage.setItem(draftSlot(),hex(iv)+hex(cipher));
+    }else sessionStorage.removeItem(draftSlot());
+    return true;
+  }catch{el('directoryStatus').textContent='无法保存文字草稿，请先复制或发送。';return false;}
+}
+let cloud=null, refreshing=null, backupBusy=false;
+const recoverySlot=()=> 'qinti-chat-recovery:'+state.owner;
+async function directoryRequest(args){
+  const {data}=await client.auth.getSession();
+  if(data.session?.user.id!==state.owner)throw Error('请重新登录当前账号。');
+  const response=await fetch(api+'/rest/v1/rpc/qinti_directory',{
+    method:'POST',headers:{apikey:publishableKey,Authorization:'Bearer '+data.session.access_token,'Content-Type':'application/json'},
+    body:JSON.stringify(args),signal:AbortSignal.timeout(15000)
+  });
+  if(!response.ok)throw Error('无法同步会话，请检查网络后重试。');
+  return response.json();
+}
+function showBackupControls(unlocked){
+  const registered=!!cloud?.verifier;
+  el('backupHint').textContent=!cloud?'连接云端后可设置恢复码。':!registered
+    ? '启用后，请私下保存恢复码。新设备登录同一账号后，用它恢复聊天密钥。'
+    : unlocked?'本机已解锁。新设备登录同一账号后，输入此恢复码即可打开已备份的会话。'
+    :'请输入已启用设备上的恢复码。尚未备份的会话需先在原设备打开聊天并完成同步。';
+  el('recoveryInput').hidden=!registered || unlocked;
+  el('backupAction').hidden=!cloud;
+  el('backupAction').textContent=!registered?'启用加密备份':unlocked?'查看恢复码':'解锁并同步';
+  el('backupAction').disabled=backupBusy;
+}
+async function syncDirectory(){
+  if(refreshing)return refreshing;
+  refreshing=(async()=>{
+    el('refreshDirectory').disabled=true;
+    el('cloudStatus').textContent='正在同步会话…';
+    const snapshot=await directoryRequest({action:'list'});
+    cloud=snapshot;
+    const code=localStorage.getItem(recoverySlot());
+    const protection=code && await recoveryKey(code);
+    const unlocked=!!protection && !!snapshot.verifier && protection.verifier===snapshot.verifier;
+    showBackupControls(unlocked);
+    const local=new Map(hostRooms().map(r=>[r.room,r]));
+    let failed=0;
+    if(unlocked){
+      for(const entry of snapshot.rooms){
+        try{
+          const record=local.get(entry.room);
+          if(!record && entry.envelope){
+            const restored=await restoreRoom(entry,state.owner,protection.key);
+            localStorage.setItem(roomPrefix()+entry.room,JSON.stringify(restored));
+          }else if(record && !entry.envelope){
+            const envelope=await sealRoom(record,protection.key);
+            await directoryRequest({action:'save',room:entry.room,verifier:protection.verifier,envelope});
+            entry.envelope=envelope;
+          }
+        }catch{failed++;}
+      }
+    }
+    el('cloudStatus').textContent='云端会话 '+snapshot.rooms.length+' 个'+(failed?' · '+failed+' 个密钥同步失败，重开列表可重试':'');
+    if(!state.room && snapshot.rooms.length){
+      el('intro').textContent='打开会话列表，选择要继续的聊天。';
+      el('create').textContent='打开会话列表';
+    }
+  })().catch(()=>{
+    el('cloudStatus').textContent='同步失败，显示已缓存的会话。';
+  }).finally(()=>{refreshing=null;el('refreshDirectory').disabled=false;renderDirectory();});
+  return refreshing;
 }
 function renderDirectory(){
-  const rows=hostRooms().map(room=>{
+  const local=new Map(hostRooms().map(record=>[record.room,record]));
+  const entries=cloud ? cloud.rooms : [...local.values()];
+  const filter=el('roomSearch').value.trim().toLocaleLowerCase();
+  const rows=[];
+  for(const entry of entries){
+    const record=local.get(entry.room);
+    const name=record?roomLabel(record):roomLabel({...entry,label:entry.title});
+    if(!name.toLocaleLowerCase().includes(filter))continue;
     const button=document.createElement('button');
     button.type='button';
-    button.textContent=roomLabel(room);
-    button.setAttribute('aria-current',String(room.room===state.room));
-    button.onclick=()=>{
-      if(room.room===state.room){el('directory').close();return;}
-      if(!canLeaveRoom())return;
-      rememberSelection(room.room);
+    const heading=document.createElement('strong');
+    heading.textContent=name;
+    const detail=document.createElement('small');
+    detail.textContent=!cloud?'本机缓存':record?(entry.envelope?'云端 · 已备份密钥':'云端 · 本机可打开')
+      :entry.envelope?'云端 · 需恢复码':'云端 · 等待原设备备份密钥';
+    button.append(heading,detail);
+    button.setAttribute('aria-current',String(entry.room===state.room));
+    button.onclick=async()=>{
+      if(!record){
+        el('backupSettings').open=true;
+        el('directoryStatus').textContent=entry.envelope?'输入恢复码即可打开此会话。':'请先在有此会话记录的原设备启用加密备份。';
+        if(!el('recoveryInput').hidden)el('recoveryInput').focus();
+        return;
+      }
+      if(record.room===state.room){el('directory').close();return;}
+      if(!await canLeaveRoom())return;
+      rememberSelection(record.room);
       location.reload();
     };
-    return button;
-  });
+    rows.push(button);
+  }
   el('rooms').replaceChildren(...rows);
+  if(!rows.length)el('rooms').textContent=filter?'没有匹配的会话':'暂无会话';
 }
+el('roomSearch').oninput=renderDirectory;
+el('refreshDirectory').onclick=syncDirectory;
+el('backupAction').onclick=async()=>{
+  if(backupBusy)return;
+  backupBusy=true;el('backupAction').disabled=true;
+  try{
+    await syncDirectory();
+    if(!el('directory').open)return;
+    if(!cloud)throw Error('暂时无法连接云端。');
+    const stored=localStorage.getItem(recoverySlot());
+    const entering=!el('recoveryInput').hidden;
+    const code=entering?el('recoveryInput').value.trim():stored || makeRecoveryCode();
+    const {verifier}=await recoveryKey(code);
+    if(cloud.verifier && cloud.verifier!==verifier)throw Error('恢复码与本账号不匹配。');
+    if(!cloud.verifier){
+      // Store before activation, so a lost response cannot lose the only copy.
+      localStorage.setItem(recoverySlot(),code);
+      await directoryRequest({action:'enable',verifier});
+    }
+    localStorage.setItem(recoverySlot(),code);
+    el('recoveryInput').value='';
+    if(!entering && el('directory').open){el('recoveryOutput').value=code;el('recoveryOutput').hidden=false;el('recoveryOutput').select();}
+    el('directoryStatus').textContent='';
+    await syncDirectory();
+  }catch(err){el('directoryStatus').textContent=err.message;}
+  finally{backupBusy=false;el('backupAction').disabled=false;}
+};
+el('directory').addEventListener('close',()=>{
+  el('recoveryOutput').hidden=true;el('recoveryOutput').value='';el('recoveryInput').value='';
+  el('backupSettings').open=false;
+});
 function showDirectory(){
   el('directoryStatus').textContent='';
+  el('roomSearch').value='';
+  el('newRoomDetails').open=!state.room && !(cloud?.rooms.length || hostRooms().length);
   renderDirectory();
   el('directory').showModal();
-  if(!state.room)el('roomName').focus();
+  syncDirectory();
 }
 el('chooseRoom').onclick=el('create').onclick=showDirectory;
 el('dismissDirectory').onclick=()=>el('directory').close();
@@ -192,11 +324,12 @@ el('roomType').onchange=()=>{
 };
 el('newRoomForm').onsubmit=async e=>{
   e.preventDefault();
-  if(el('newRoom').disabled || !canLeaveRoom())return;
+  if(el('newRoom').disabled)return;
   el('newRoom').disabled=el('dismissDirectory').disabled=true;
   el('rooms').inert=true;
   el('roomType').disabled=el('roomName').disabled=true;
   try{
+    if(!await canLeaveRoom())return;
     newCandidate ||= {owner:state.owner,room:crypto.randomUUID(),key:hex(random(32)),invite:hex(random(32)),created:Date.now()};
     newCandidate.label=el('roomName').value.trim();
     newCandidate.group=el('roomType').value==='group';
@@ -238,7 +371,7 @@ click('join',async()=>{
 });
 click('closeRoom',async()=>{
   if(!confirm(state.group?'解散群聊并删除所有群消息和附件？':'结束私聊并删除这段对话的所有消息？'))return;
-  await rpc('close');active=false;
+  await rpc('close');active=false;sessionStorage.removeItem(draftSlot());
   localStorage.removeItem(roomPrefix()+state.room);
   sessionStorage.removeItem(storeKey);
   const saved=JSON.parse(localStorage.getItem(storeKey));
@@ -315,7 +448,7 @@ el('composer').onsubmit=async e=>{
     if(text){
       if(pending?.text!==text)pending={text,id:crypto.randomUUID()};
       await sendPacket(text,pending.id);
-      pending=null;draft.value='';
+      pending=null;draft.value='';sessionStorage.removeItem(draftSlot());
     }
     say('');sizeDraft();
     await refresh();scrollToLatest();
@@ -353,6 +486,7 @@ async function start(){
     const selected=rooms.find(r=>r.room===sessionStorage.getItem(storeKey))
       || rooms.find(r=>r.room===saved?.selectedRoom) || rooms[0];
     el('chooseRoom').hidden=false;
+    syncDirectory();
     if(selected){
       state=selected;
       sessionStorage.setItem(storeKey,state.room);

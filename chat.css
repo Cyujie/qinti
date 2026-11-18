@@ -92,3 +92,15 @@ footer:has(#composer[hidden]):has(#status:empty):has(#invite[hidden]) { display:
 #nickField { pointer-events:auto; }
 #nickname { max-width:11rem; }
 .sender { display:block; color:var(--blue); font-weight:600; font-size:.78rem; }
+
+#cloudStatus,#backupHint,#directoryStatus { color:var(--muted); font-size:.84rem; margin:.45rem 0; }
+#directory input:not([hidden]) { width:100%; min-width:0; font:inherit; color:var(--ink); background:var(--surface); padding:.55rem; border:1px solid var(--line); border-radius:8px; }
+#directory #rooms { margin:.6rem 0; }
+#rooms button strong,#rooms button small { display:block; }
+#rooms button small { font-size:.77rem; }
+#directory details { border-top:1px solid var(--line); padding:.45rem 0; }
+#directory summary { padding:.4rem 0; color:var(--blue); letter-spacing:normal; }
+#backupAction { color:var(--blue); padding:.5rem 0; }
+
+.sync-line { display:flex; align-items:center; justify-content:space-between; gap:.5rem; }
+#refreshDirectory { color:var(--blue); flex:none; padding:.35rem; }
