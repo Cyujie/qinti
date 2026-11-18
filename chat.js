@@ -578,5 +578,14 @@ if(hostFrame){
   observer.observe(parentRoot,{attributes:true,attributeFilter:['data-theme']});
   window.addEventListener('pagehide', event => { if(!event.persisted)observer.disconnect(); });
 }
-start().catch(e=>say(e.message));
+start().then(()=>{
+  if (!hostFrame || !state?.owner) return;
+  // The host may preload a hidden frame for notifications.
+  const firstVisit = new IntersectionObserver(entries=>{
+    if (!entries.some(entry=>entry.isIntersecting)) return;
+    firstVisit.disconnect();
+    if (!el('directory').open) showDirectory();
+  });
+  firstVisit.observe(document.documentElement);
+}).catch(e=>say(e.message));
 setInterval(()=>{if(notificationsOn() || (!document.hidden && (!hostFrame || hostFrame.getClientRects().length)))refresh().catch(e=>say(e.message));},3000);
