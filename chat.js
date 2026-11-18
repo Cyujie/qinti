@@ -1,3 +1,4 @@
+import { MAX_FILE_SIZE, prepareFile, uploadFile, renderFile } from './chat-media.js';
 const api = 'https://uomgorcvmqodmfnxovri.supabase.co';
 const publishableKey = 'sb_publishable_udvGflXSwMiribxIMmNlew_dZUD3Ng1';
 const el = id => document.getElementById(id);
@@ -10,16 +11,20 @@ const params = new URLSearchParams(location.hash.slice(1));
 const isGuest = params.has('room');
 let client, state, storeKey, key, last = 0, reading = false, active = false, pending;
 function persist(){localStorage.setItem(storeKey,JSON.stringify(state));}
-async function rpc(action, extra = {}) {
+function rpc(action, extra = {}) {
+  return request('qinti_chat', {action, ...extra});
+}
+function filePart(extra) { return request('qinti_chat_part', extra); }
+async function request(endpoint, extra) {
   let authorization = {};
   if (!isGuest) {
     const session = (await client.auth.getSession()).data.session;
     if (!session || session.user.id !== state.owner) throw Error('请回到青提首页登录。');
     authorization.Authorization = 'Bearer ' + session.access_token;
   }
-  const response = await fetch(api+'/rest/v1/rpc/qinti_chat',{
+  const response = await fetch(api+'/rest/v1/rpc/'+endpoint,{
     method:'POST',headers:{apikey:publishableKey,'Content-Type':'application/json',...authorization},
-    body:JSON.stringify({action,room:state.room,token:isGuest?state.guest:'',...extra})
+    body:JSON.stringify({room:state.room,token:isGuest?state.guest:'',...extra})
   });
   if(!response.ok){
     const error = await response.json().catch(()=>({}));
@@ -31,6 +36,38 @@ async function rpc(action, extra = {}) {
   return response.json();
 }
 function inviteURL(){const url=new URL('chat.html',location.href);url.hash=new URLSearchParams({room:state.room,invite:state.invite,key:state.key});return url.href;}
+const notificationsKey = () => 'qinti-chat-notify:' + storeKey;
+function notificationsOn(){
+  return storeKey && window.Notification?.permission === 'granted' && localStorage.getItem(notificationsKey()) === '1';
+}
+function updateNotifyButton(){
+  el('notify').hidden = !active || !window.Notification;
+  el('notify').textContent = notificationsOn() ? '关闭桌面通知' : '开启桌面通知';
+}
+click('notify', async () => {
+  if(notificationsOn()) localStorage.removeItem(notificationsKey());
+  else {
+    const permission = await Notification.requestPermission();
+    if(permission !== 'granted'){say('要接收通知，请在浏览器的网站权限中允许通知。');return;}
+    localStorage.setItem(notificationsKey(),'1');
+  }
+  updateNotifyButton();
+});
+let historyLoaded = false;
+function notifyIncoming(){
+  if(!notificationsOn())return;
+  const viewing = !document.hidden && (hostFrame?.ownerDocument || document).hasFocus() && (!hostFrame || hostFrame.getClientRects().length);
+  if(viewing)return;
+  try {
+    const notice = new Notification('青提私聊', {body:'收到新消息', tag:'qinti-chat-'+state.room});
+    notice.onclick = () => {
+      (hostFrame?.ownerDocument.defaultView || window).focus();
+      hostFrame?.ownerDocument.querySelector('[data-page="chat"]')?.click();
+      el('draft').focus();
+      notice.close();
+    };
+  } catch {say('此浏览器暂时无法显示桌面通知。');}
+}
 async function refresh(){
   if(reading || !active)return;
   reading=true;
@@ -38,20 +75,27 @@ async function refresh(){
     const {messages,joined}=await rpc('read',{cursor_seq:last});
     if(!isGuest){el('invite').hidden=joined; if(joined)el('copyField').hidden=true;}
     if(last===0 && !messages.length)say(joined?'双方已连接。':'邀请有效期为 24 小时，首位接受者可加入。');
+    let incoming = false;
     for(const m of messages){
       const item=document.createElement('li');
-      const packed=bits(m.packet);
-      try{item.textContent=new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:packed.slice(0,12)},key,packed.slice(12)));}
+      try{
+        const packed=bits(m.packet);
+        const text=new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:packed.slice(0,12)},key,packed.slice(12)));
+        if(!renderFile(text,item,key,filePart))item.textContent=text;
+      }
       catch{item.textContent='此消息无法解密';}
       if(m.from_host===!isGuest)item.className='mine';
+      else incoming = true;
       el('messages').append(item); last=m.seq;
     }
+    if(historyLoaded && incoming)notifyIncoming();
+    if(messages.length < 100)historyLoaded=true;
     if(messages.length){el('messages').scrollTop=el('messages').scrollHeight;say('私聊中');}
   }finally{reading=false;}
 }
 async function openRoom(){
   key=await crypto.subtle.importKey('raw',bits(state.key),'AES-GCM',false,['encrypt','decrypt']);
-  active=true; await refresh(); el('composer').hidden=false;el('join').hidden=true;el('closeRoom').hidden=isGuest;
+  active=true; await refresh(); updateNotifyButton(); el('composer').hidden=false;el('join').hidden=true;el('closeRoom').hidden=isGuest;
 }
 function click(id,callback){el(id).onclick=async()=>{el(id).disabled=true;try{await callback();}catch(e){say(e.message);}finally{el(id).disabled=false;}};}
 click('create',async()=>{
@@ -74,18 +118,65 @@ click('closeRoom',async()=>{
   if(!confirm('结束私聊并删除这段对话的所有消息？'))return;
   await rpc('close');active=false;localStorage.removeItem(storeKey);location.reload();
 });
+const queue = [];
+const draft = el('draft');
+function showQueue(){
+  el('queued').replaceChildren(...queue.map(entry => {
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = entry.file.name + ' ×';
+    remove.setAttribute('aria-label', '移除 ' + entry.file.name);
+    remove.disabled = el('send').disabled;
+    remove.onclick = () => { queue.splice(queue.indexOf(entry),1); showQueue(); };
+    return remove;
+  }));
+}
+function addFiles(files){
+  if(el('send').disabled)return;
+  for(const file of files){
+    if(!file.size || file.size > MAX_FILE_SIZE){say('文件为空或超过 16 MB：'+file.name);continue;}
+    if(queue.length >= 8){say('每次最多选择 8 个附件。');break;}
+    queue.push({file, id:crypto.randomUUID()});
+  }
+  showQueue();
+}
+el('attach').onclick = () => el('files').click();
+el('files').onchange = e => {addFiles(e.target.files);e.target.value='';draft.focus();};
+draft.addEventListener('paste', e => {
+  const files = Array.from(e.clipboardData?.files || []);
+  if(files.length){e.preventDefault();addFiles(files);}
+});
+draft.addEventListener('keydown', e => {
+  if(e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229)return;
+  e.preventDefault();
+  if(!e.repeat && !el('send').disabled)el('composer').requestSubmit();
+});
+async function sendPacket(text,id){
+  const iv=random(12);
+  const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,new TextEncoder().encode(text));
+  await rpc('send',{payload:hex(iv)+hex(cipher),message_id:id});
+}
 el('composer').onsubmit=async e=>{
-  e.preventDefault();if(el('send').disabled)return;
-  const draft=el('draft'), text=draft.value.trim();if(!text)return;
-  el('send').disabled=true;draft.readOnly=true;
+  e.preventDefault();
+  const text=draft.value.trim();
+  if(el('send').disabled || (!text && !queue.length))return;
+  el('send').disabled=true;el('attach').disabled=true;draft.readOnly=true;showQueue();
   try{
-    if(pending?.text!==text){
-      const iv=random(12), cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,new TextEncoder().encode(text));
-      pending={text,id:crypto.randomUUID(),packet:hex(iv)+hex(cipher)};
+    while(queue.length){
+      const entry=queue[0];
+      if(!entry.upload)entry.upload=await prepareFile(entry.file,key);
+      await uploadFile(entry.upload,filePart,(part,total)=>say('正在发送 '+entry.file.name+' · '+part+'/'+total));
+      await sendPacket(entry.upload.manifest,entry.id);
+      queue.shift();showQueue();
     }
-    await rpc('send',{payload:pending.packet,message_id:pending.id});
-    pending=null;draft.value='';await refresh();
-  }catch(err){say(err.message);}finally{draft.readOnly=false;el('send').disabled=false;}
+    if(text){
+      if(pending?.text!==text)pending={text,id:crypto.randomUUID()};
+      await sendPacket(text,pending.id);
+      pending=null;draft.value='';
+    }
+    await refresh();
+  }catch(err){say('发送失败：'+err.message+' 可再次点发送。');}
+  finally{draft.readOnly=false;el('send').disabled=false;el('attach').disabled=false;showQueue();draft.focus();}
 };
 async function start(){
   if(isGuest){
@@ -119,4 +210,4 @@ if(hostFrame){
   }).observe(content);
 }
 start().catch(e=>say(e.message));
-setInterval(()=>{if(!document.hidden && (!hostFrame || hostFrame.getClientRects().length))refresh().catch(e=>say(e.message));},3000);
+setInterval(()=>{if(notificationsOn() || (!document.hidden && (!hostFrame || hostFrame.getClientRects().length)))refresh().catch(e=>say(e.message));},3000);
