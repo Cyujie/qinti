@@ -87,3 +87,8 @@ footer:has(#composer[hidden]):has(#status:empty):has(#invite[hidden]) { display:
 #roomName { width:100%; background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:.55rem; }
 #newRoom { padding:.6rem; }
 #directoryStatus:empty { display:none; }
+
+#roomType,#nickname { color:var(--ink); background:var(--surface); border:1px solid var(--line); border-radius:8px; font:inherit; padding:.5rem; }
+#nickField { pointer-events:auto; }
+#nickname { max-width:11rem; }
+.sender { display:block; color:var(--blue); font-weight:600; font-size:.78rem; }

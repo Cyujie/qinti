@@ -32,7 +32,7 @@ const isGuest = params.has('room');
 let client, state, storeKey, key, last = 0, reading = false, active = false, pending;
 function persist(){localStorage.setItem(storeKey,JSON.stringify(state));}
 function rpc(action, extra = {}) {
-  return request('qinti_chat', {action, ...extra});
+  return request(state?.group ? 'qinti_group' : 'qinti_chat', {action, ...extra});
 }
 function filePart(extra) { return request('qinti_chat_part', extra); }
 async function request(endpoint, extra) {
@@ -55,7 +55,7 @@ async function request(endpoint, extra) {
   }
   return response.json();
 }
-function inviteURL(){const url=new URL('chat.html',location.href);url.hash=new URLSearchParams({room:state.room,invite:state.invite,key:state.key});return url.href;}
+function inviteURL(invite){const url=new URL('chat.html',location.href);url.hash=new URLSearchParams({room:state.room,invite,key:state.key,...(state.group?{group:'1'}:{})});return url.href;}
 const notificationsKey = () => 'qinti-chat-notify:' + storeKey;
 function notificationsOn(){
   return storeKey && window.Notification?.permission === 'granted' && localStorage.getItem(notificationsKey()) === '1';
@@ -79,7 +79,7 @@ function notifyIncoming(){
   const viewing = !document.hidden && (hostFrame?.ownerDocument || document).hasFocus() && (!hostFrame || hostFrame.getClientRects().length);
   if(viewing)return;
   try {
-    const notice = new Notification('青提私聊', {body:'收到新消息', tag:'qinti-chat-'+state.room});
+    const notice = new Notification(state.group?'青提群聊':'青提私聊', {body:'收到新消息', tag:'qinti-chat-'+state.room});
     notice.onclick = () => {
       (hostFrame?.ownerDocument.defaultView || window).focus();
       hostFrame?.ownerDocument.querySelector('[data-page="chat"]')?.click();
@@ -92,11 +92,14 @@ async function refresh(){
   if(reading || !active)return;
   reading=true;
   try{
-    const {messages,joined}=await rpc('read',{cursor_seq:last});
-    if(!isGuest){el('invite').hidden=joined; if(joined)el('copyField').hidden=true;}
-    el('roomState').textContent = joined ? '加密对话 · 对方已加入' : '加密对话 · 等待好友加入';
+    const {messages,joined,title,members}=await rpc('read',{cursor_seq:last});
+    if(!isGuest){el('invite').hidden=!state.group && joined; if(!state.group && joined)el('copyField').hidden=true;}
+    if(state.group){
+      el('chatTitle').textContent=title;
+      el('roomState').textContent='加密群聊 · '+members+' 人';
+    }else el('roomState').textContent = joined ? '加密对话 · 对方已加入' : '加密对话 · 等待好友加入';
     if (!last && !messages.length) {
-      el('intro').textContent = joined ? '发送第一条消息' : '复制邀请链接发给好友，24 小时内有效。';
+      el('intro').textContent = (state.group ? members>1 : joined) ? '发送第一条消息' : '复制邀请链接发给好友，24 小时内有效。';
     }
     const follow = !last || nearLatest();
     let incoming = false;
@@ -108,7 +111,13 @@ async function refresh(){
         if(!renderFile(text,item,key,filePart))item.textContent=text;
       }
       catch{item.textContent='此消息无法解密';}
-      if(m.from_host===!isGuest)item.className='mine';
+      if(state.group){
+        const label=document.createElement('span');
+        label.className='sender';
+        label.textContent=m.from_host?'群主':'成员 · '+m.sender;
+        item.prepend(label);
+      }
+      if(state.group ? m.mine : m.from_host===!isGuest)item.className='mine';
       else incoming = true;
       el('messages').append(item); last=m.seq;
     }
@@ -123,7 +132,8 @@ async function refresh(){
 }
 async function openRoom(){
   key=await crypto.subtle.importKey('raw',bits(state.key),'AES-GCM',false,['encrypt','decrypt']);
-  active=true; await refresh(); updateNotifyButton(); el('composer').hidden=false;el('join').hidden=true;el('closeRoom').hidden=isGuest;
+  if(state.group){el('closeRoom').textContent='解散群聊';el('invite').textContent='邀请群成员';}
+  active=true; await refresh();el('nickField').hidden=true; updateNotifyButton(); el('composer').hidden=false;el('join').hidden=true;el('closeRoom').hidden=isGuest;
   options.hidden = el('notify').hidden && el('closeRoom').hidden;
 }
 function click(id,callback){el(id).onclick=async()=>{el(id).disabled=true;try{await callback();}catch(e){say(e.message);}finally{el(id).disabled=false;}};}
@@ -135,7 +145,7 @@ function hostRooms(){
     .filter(r=>r?.owner===state.owner && r.room && r.key)
     .sort((a,b)=>(b.created || 0)-(a.created || 0));
 }
-function roomLabel(room){return room.label || '私聊 · ' + room.room.slice(0,6);}
+function roomLabel(room){return room.group ? '群聊 · '+room.label : room.label || '私聊 · ' + room.room.slice(0,6);}
 function rememberSelection(id){
   sessionStorage.setItem(storeKey,id);
   localStorage.setItem(storeKey,JSON.stringify({selectedRoom:id}));
@@ -173,22 +183,33 @@ el('chooseRoom').onclick=el('create').onclick=showDirectory;
 el('dismissDirectory').onclick=()=>el('directory').close();
 el('directory').addEventListener('cancel',e=>{if(el('newRoom').disabled)e.preventDefault();});
 let newCandidate;
+el('roomType').onchange=()=>{
+  newCandidate=null;
+  const group=el('roomType').value==='group';
+  el('roomName').required=group;
+  el('nameLabel').textContent=group?'群名称（成员可见）':'新会话备注（仅自己可见）';
+  el('newRoom').textContent=group?'新建群聊':'新建私聊';
+};
 el('newRoomForm').onsubmit=async e=>{
   e.preventDefault();
   if(el('newRoom').disabled || !canLeaveRoom())return;
   el('newRoom').disabled=el('dismissDirectory').disabled=true;
   el('rooms').inert=true;
+  el('roomType').disabled=el('roomName').disabled=true;
   try{
     newCandidate ||= {owner:state.owner,room:crypto.randomUUID(),key:hex(random(32)),invite:hex(random(32)),created:Date.now()};
     newCandidate.label=el('roomName').value.trim();
+    newCandidate.group=el('roomType').value==='group';
+    if(newCandidate.group && !newCandidate.label)throw Error('请输入群名称。');
+    const endpoint=newCandidate.group?'qinti_group':'qinti_chat';
     // Retrying after an interrupted response can recover the room already created.
-    try{await rpc('create',{room:newCandidate.room,payload:await digest(newCandidate.invite)});}
-    catch(err){try{await rpc('read',{room:newCandidate.room});}catch{throw err;}}
+    try{await request(endpoint,{action:'create',room:newCandidate.room,payload:newCandidate.group?newCandidate.label:await digest(newCandidate.invite)});}
+    catch(err){try{await request(endpoint,{action:'read',room:newCandidate.room});}catch{throw err;}}
     localStorage.setItem(roomPrefix()+newCandidate.room,JSON.stringify(newCandidate));
     rememberSelection(newCandidate.room);
     location.reload();
   }catch(err){el('directoryStatus').textContent=err.message;}
-  finally{el('newRoom').disabled=el('dismissDirectory').disabled=false;el('rooms').inert=false;}
+  finally{el('newRoom').disabled=el('dismissDirectory').disabled=false;el('rooms').inert=false;el('roomType').disabled=el('roomName').disabled=false;}
 };
 window.addEventListener('storage',e=>{
   if(isGuest || !storeKey || !e.key?.startsWith(roomPrefix()))return;
@@ -196,19 +217,27 @@ window.addEventListener('storage',e=>{
   if(el('directory').open)renderDirectory();
 });
 click('invite',async()=>{
-  const url=inviteURL();
-  try{await navigator.clipboard.writeText(url);say('邀请链接已复制，请私下发给对方。');}
+  el('copyField').hidden=true;
+  let invite=state.invite;
+  if(state.group){
+    invite=hex(random(32));
+    await rpc('invite',{payload:await digest(invite)});
+  }
+  const url=inviteURL(invite);
+  try{await navigator.clipboard.writeText(url);say(state.group?'已复制一人份邀请链接，邀请下一位请再点一次。':'邀请链接已复制，请私下发给对方。');}
   catch{el('copyField').hidden=false;el('copyField').value=url;el('copyField').select();}
 });
 click('join',async()=>{
   // Keep the same claim secret if the response is lost after the server commits.
+  const nickname=el('nickname').value.trim();
+  if(state.group && !nickname){say('请输入群内昵称。');el('nickname').focus();return;}
   if(!state.guest){state.guest=hex(random(32));persist();}
-  try{await rpc('join',{token:params.get('invite'),payload:await digest(state.guest)});}
+  try{await rpc('join',{token:params.get('invite'),payload:await digest(state.guest),...(state.group?{nickname}:{})});}
   catch(e){try{await rpc('read');}catch{throw e;}}
   state.accepted=true;persist();history.replaceState(null,'','#room='+state.room);await openRoom();
 });
 click('closeRoom',async()=>{
-  if(!confirm('结束私聊并删除这段对话的所有消息？'))return;
+  if(!confirm(state.group?'解散群聊并删除所有群消息和附件？':'结束私聊并删除这段对话的所有消息？'))return;
   await rpc('close');active=false;
   localStorage.removeItem(roomPrefix()+state.room);
   sessionStorage.removeItem(storeKey);
@@ -301,8 +330,13 @@ async function start(){
     state=JSON.parse(localStorage.getItem(storeKey));
     if(state?.accepted){await openRoom();return;}
     if(![params.get('invite'),params.get('key')].every(v=>/^[0-9a-f]{64}$/.test(v||'')))throw Error('请打开完整的邀请链接。');
-    state={room,key:params.get('key'),guest:state?.guest};
-    say('首次接受后，仅此浏览器可继续这段对话。');el('join').hidden=false;
+    state={room,key:params.get('key'),guest:state?.guest,group:params.get('group')==='1'};
+    if(state.group){
+      el('nickField').hidden=false;
+      el('chatTitle').textContent='青提群聊';
+      el('join').textContent='加入群聊';
+    }
+    say(state.group?'填写昵称加入群聊，可查看群内已有消息。':'首次接受后，仅此浏览器可继续这段对话。');el('join').hidden=false;
   }else{
     const {createClient}=await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm');
     client=createClient(api,publishableKey);
@@ -325,7 +359,7 @@ async function start(){
       el('chatTitle').textContent=roomLabel(state);
       await openRoom();
     }
-    else{say('创建一段私聊，邀请一位朋友加入。');el('create').hidden=false;}
+    else{say('创建会话，邀请好友加入。');el('create').hidden=false;}
   }
 }
 // Only the signed-in homepage embeds the host view. Invitations open independently.

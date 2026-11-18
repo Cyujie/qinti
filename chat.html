@@ -26,7 +26,9 @@
       <div class="directory-head"><h2 id="directoryTitle">会话列表</h2><button id="dismissDirectory" class="icon" aria-label="关闭会话列表">×</button></div>
       <div id="rooms"></div>
       <form id="newRoomForm">
-        <label for="roomName">新会话备注（仅自己可见）</label>
+        <label for="roomType">会话类型</label>
+        <select id="roomType"><option value="direct">一对一私聊</option><option value="group">群聊</option></select>
+        <label id="nameLabel" for="roomName">新会话备注（仅自己可见）</label>
         <input id="roomName" maxlength="40" placeholder="例如：周末采摘">
         <button class="primary" id="newRoom">新建私聊</button>
       </form>
@@ -37,7 +39,8 @@
       <div class="welcome" id="welcome">
         <span class="seal" aria-hidden="true"><i></i></span>
         <p id="intro">正在打开对话…</p>
-        <button class="primary" id="create" hidden>创建私聊</button>
+        <button class="primary" id="create" hidden>创建会话</button>
+        <label id="nickField" hidden>群内昵称 <input id="nickname" maxlength="24" autocomplete="off"></label>
         <button class="primary" id="join" hidden>接受邀请</button>
       </div>
       <button id="latest" hidden>↓ 回到最新消息</button>
