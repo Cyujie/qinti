@@ -1,4 +1,4 @@
-import {makeRecoveryCode,recoveryKey,sealRoom,restoreRoom} from './chat-recovery.js';
+import {makeRecoveryCode,recoveryKey,sealRoom,restoreRoom,encryptLabel,decryptLabel} from './chat-recovery.js';
 import { MAX_FILE_SIZE, prepareFile, uploadFile, renderFile } from './chat-media.js';
 const api = 'https://uomgorcvmqodmfnxovri.supabase.co';
 const publishableKey = 'sb_publishable_udvGflXSwMiribxIMmNlew_dZUD3Ng1';
@@ -135,6 +135,8 @@ async function openRoom(){
   key=await crypto.subtle.importKey('raw',bits(state.key),'AES-GCM',false,['encrypt','decrypt']);
   if(state.group){el('closeRoom').textContent='解散群聊';el('invite').textContent='邀请群成员';}
   active=true; await refresh();el('nickField').hidden=true; updateNotifyButton(); el('composer').hidden=false;el('join').hidden=true;el('closeRoom').hidden=isGuest;
+  el('rename').hidden=isGuest;
+  el('rename').textContent=state.group?'修改群名称':'修改私聊备注';
   options.hidden = el('notify').hidden && el('closeRoom').hidden;
   const savedDraft=sessionStorage.getItem(draftSlot());
   if(savedDraft && !draft.value){
@@ -178,16 +180,84 @@ async function canLeaveRoom(){
 }
 let cloud=null, refreshing=null, backupBusy=false;
 const recoverySlot=()=> 'qinti-chat-recovery:'+state.owner;
-async function directoryRequest(args){
+async function directoryRequest(args,endpoint='qinti_directory'){
   const {data}=await client.auth.getSession();
   if(data.session?.user.id!==state.owner)throw Error('请重新登录当前账号。');
-  const response=await fetch(api+'/rest/v1/rpc/qinti_directory',{
+  const response=await fetch(api+'/rest/v1/rpc/'+endpoint,{
     method:'POST',headers:{apikey:publishableKey,Authorization:'Bearer '+data.session.access_token,'Content-Type':'application/json'},
     body:JSON.stringify(args),signal:AbortSignal.timeout(15000)
   });
-  if(!response.ok)throw Error('无法同步会话，请检查网络后重试。');
+  if(!response.ok){
+    const error=await response.json().catch(()=>({}));
+    if(error.code==='40001')throw Error('名称已在其他设备修改。请取消并重新打开，查看最新名称。');
+    throw Error('无法同步会话，请检查网络后重试。');
+  }
   return response.json();
 }
+function cacheName(record,label,version){
+  const slot=roomPrefix()+record.room;
+  const current=JSON.parse(localStorage.getItem(slot));
+  if(!current || version<(current.nameVersion || 0))return;
+  if(current.nameVersion!==version || current.label!==label){
+    localStorage.setItem(slot,JSON.stringify({...current,label,nameVersion:version}));
+  }
+  if(state.room===record.room){
+    state.label=label;
+    state.nameVersion=version;
+    el('chatTitle').textContent=state.group?label:roomLabel(state);
+  }
+}
+async function applyCloudName(record,entry){
+  const version=entry.name_version;
+  if(!record || !Number.isSafeInteger(version) || version<(record.nameVersion || 0))return;
+  if(record.group)cacheName(record,entry.title,version);
+  else if(version>0 && entry.encrypted_label){
+    const label=record.nameVersion===version?record.label:await decryptLabel(record,entry.encrypted_label);
+    cacheName(record,label,version);
+  }
+}
+let editVersion=0;
+const renameDialog=el('renameDialog');
+click('rename',async()=>{
+  const entry=await directoryRequest({action:'name',room:state.room});
+  await applyCloudName(state,entry);
+  editVersion=entry.name_version;
+  el('renameTitle').textContent=state.group?'修改群名称':'修改私聊备注';
+  el('renameHint').textContent=state.group?'群内所有成员可见':'仅自己的已解锁设备可见，留空可恢复默认名称';
+  el('renameInput').required=!!state.group;
+  el('renameInput').value=state.label || '';
+  el('renameStatus').textContent='';
+  renameDialog.showModal();
+  el('renameInput').select();
+});
+el('renameCancel').onclick=()=>renameDialog.close();
+renameDialog.oncancel=e=>{if(el('renameSave').disabled)e.preventDefault();};
+el('renameForm').onsubmit=async e=>{
+  e.preventDefault();
+  if(el('renameSave').disabled)return;
+  const label=el('renameInput').value.trim();
+  if(state.group && !label){el('renameStatus').textContent='请输入群名称。';return;}
+  el('renameCancel').disabled=el('renameSave').disabled=true;
+  try{
+    const value=state.group?label:await encryptLabel(state,key,label);
+    const version=await directoryRequest({room:state.room,expected:editVersion,new_name:value},'qinti_rename');
+    cacheName(state,label,version);
+    renameDialog.close();
+    say('名称已保存。');
+  }catch(err){el('renameStatus').textContent=err.message;}
+  finally{el('renameCancel').disabled=el('renameSave').disabled=false;}
+};
+let checkingName=false;
+async function refreshPrivateName(){
+  if(isGuest || !active || state.group || document.hidden || checkingName || (hostFrame && !hostFrame.getClientRects().length))return;
+  checkingName=true;
+  try{await applyCloudName(state,await directoryRequest({action:'name',room:state.room}));}
+  catch{/* The next foreground check retries without interrupting the conversation. */}
+  finally{checkingName=false;}
+}
+window.addEventListener('focus',refreshPrivateName);
+document.addEventListener('visibilitychange',refreshPrivateName);
+setInterval(refreshPrivateName,30000);
 function showBackupControls(unlocked){
   const registered=!!cloud?.verifier;
   el('backupHint').textContent=!cloud?'连接云端后可设置恢复码。':!registered
@@ -212,22 +282,22 @@ async function syncDirectory(){
     showBackupControls(unlocked);
     const local=new Map(hostRooms().map(r=>[r.room,r]));
     let failed=0;
-    if(unlocked){
-      for(const entry of snapshot.rooms){
-        try{
-          const record=local.get(entry.room);
-          if(!record && entry.envelope){
-            const restored=await restoreRoom(entry,state.owner,protection.key);
-            localStorage.setItem(roomPrefix()+entry.room,JSON.stringify(restored));
-          }else if(record && !entry.envelope){
-            const envelope=await sealRoom(record,protection.key);
-            await directoryRequest({action:'save',room:entry.room,verifier:protection.verifier,envelope});
-            entry.envelope=envelope;
-          }
-        }catch{failed++;}
-      }
+    for(const entry of snapshot.rooms){
+      try{
+        let record=local.get(entry.room);
+        if(unlocked && !record && entry.envelope){
+          record=await restoreRoom(entry,state.owner,protection.key);
+          localStorage.setItem(roomPrefix()+entry.room,JSON.stringify(record));
+        }
+        await applyCloudName(record,entry);
+        if(unlocked && record && !entry.envelope){
+          const envelope=await sealRoom(record,protection.key);
+          await directoryRequest({action:'save',room:entry.room,verifier:protection.verifier,envelope});
+          entry.envelope=envelope;
+        }
+      }catch{failed++;}
     }
-    el('cloudStatus').textContent='云端会话 '+snapshot.rooms.length+' 个'+(failed?' · '+failed+' 个密钥同步失败，重开列表可重试':'');
+    el('cloudStatus').textContent='云端会话 '+snapshot.rooms.length+' 个'+(failed?' · '+failed+' 个会话同步失败，可点刷新重试':'');
     if(!state.room && snapshot.rooms.length){
       el('intro').textContent='打开会话列表，选择要继续的聊天。';
       el('create').textContent='打开会话列表';

@@ -33,3 +33,19 @@ export async function restoreRoom(entry,owner,envelopeKey) {
   if(!/^[a-f0-9]{64}$/.test(saved.key) || !/^[a-f0-9]{64}$/.test(saved.invite) || typeof saved.label!=='string')throw Error('密钥备份格式有误。');
   return {owner,room:entry.room,created:Date.parse(entry.created),group:entry.group,label:saved.label,key:saved.key,invite:saved.invite};
 }
+
+function labelAlgorithm(record,iv){
+  return {name:'AES-GCM',iv,additionalData:encoder.encode('qinti-label-v1/'+record.owner+'/'+record.room)};
+}
+export async function encryptLabel(record,key,label){
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const bytes=await crypto.subtle.encrypt(labelAlgorithm(record,iv),key,encoder.encode(label));
+  return encode(iv)+'.'+encode(new Uint8Array(bytes));
+}
+export async function decryptLabel(record,envelope){
+  const [iv,data]=envelope.split('.');
+  const raw=Uint8Array.from(record.key.match(/../g),byte=>parseInt(byte,16));
+  const key=await crypto.subtle.importKey('raw',raw,'AES-GCM',false,['decrypt']);
+  const bytes=await crypto.subtle.decrypt(labelAlgorithm(record,decode(iv)),key,decode(data));
+  return new TextDecoder().decode(bytes);
+}

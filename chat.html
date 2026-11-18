@@ -17,11 +17,21 @@
       <details id="options" hidden>
         <summary class="icon" aria-label="聊天选项" title="聊天选项">•••</summary>
         <div class="menu">
+          <button id="rename" hidden>修改私聊备注</button>
           <button id="notify" hidden>开启桌面通知</button>
           <button id="closeRoom" hidden>结束私聊</button>
         </div>
       </details>
     </header>
+    <dialog id="renameDialog" aria-labelledby="renameTitle">
+      <form id="renameForm">
+        <h2 id="renameTitle">修改私聊备注</h2>
+        <label id="renameHint" for="renameInput">仅同一账号的已解锁设备可见</label>
+        <input id="renameInput" maxlength="40" autocomplete="off">
+        <p id="renameStatus" role="status"></p>
+        <div><button type="button" id="renameCancel">取消</button><button class="primary" id="renameSave">保存</button></div>
+      </form>
+    </dialog>
     <dialog id="directory" aria-labelledby="directoryTitle">
       <div class="directory-head"><h2 id="directoryTitle">会话列表</h2><button id="dismissDirectory" class="icon" aria-label="关闭会话列表">×</button></div>
       <div class="sync-line"><p id="cloudStatus" role="status"></p><button type="button" id="refreshDirectory">刷新</button></div>

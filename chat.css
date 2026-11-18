@@ -104,3 +104,14 @@ footer:has(#composer[hidden]):has(#status:empty):has(#invite[hidden]) { display:
 
 .sync-line { display:flex; align-items:center; justify-content:space-between; gap:.5rem; }
 #refreshDirectory { color:var(--blue); flex:none; padding:.35rem; }
+
+#renameDialog { width:min(24rem,calc(100% - 2rem)); border:1px solid var(--line); border-radius:16px; padding:1rem; background:var(--surface); color:var(--ink); }
+#renameDialog::backdrop { background:#15263166; }
+#renameForm { display:grid; gap:.65rem; }
+#renameTitle,#renameStatus { margin:0; }
+#renameTitle { font-size:1.1rem; }
+#renameHint,#renameStatus { color:var(--muted); font-size:.85rem; }
+#renameStatus:empty { display:none; }
+#renameInput { min-width:0; background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:.6rem; font:inherit; }
+#renameForm div { display:flex; justify-content:flex-end; gap:.5rem; }
+#renameForm button { padding:.5rem 1rem; }
