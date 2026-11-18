@@ -116,7 +116,7 @@ footer:has(#composer[hidden]):has(#status:empty):has(#invite[hidden]) { display:
 #renameForm div { display:flex; justify-content:flex-end; gap:.5rem; }
 #renameForm button { padding:.5rem 1rem; }
 
-main:has(#directory[open]) > :is(header,.thread,footer){display:none}
+main:has(#directory[open]) > :is(header,#older,.thread,footer){display:none}
 #directory[open]{position:static;margin:0;box-sizing:border-box;width:100%;height:100%;max-height:none;border:0;border-radius:0;overflow:auto;padding:clamp(14px,3vw,26px)}
 #directory #rooms{max-height:none}
 #rooms button{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:2px 12px;border-bottom:1px solid var(--line);border-radius:0;padding:12px 4px}
@@ -126,3 +126,6 @@ main:has(#directory[open]) > :is(header,.thread,footer){display:none}
 .room-unread{grid-column:2;grid-row:2;justify-self:end;font-size:.75rem;background:var(--blue);color:var(--surface);border-radius:1rem;padding:1px 7px}
 #inboxNotify{color:var(--blue);margin-left:auto;font-size:.85rem}
 #inboxError{color:var(--muted);font-size:.85rem}
+
+#messages{overflow-anchor:none}
+#older{color:var(--blue);font-size:.85rem;padding:.4rem}

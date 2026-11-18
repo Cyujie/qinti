@@ -40,6 +40,7 @@ const HarvestRules = (() => {
       const fail = message => { throw Error('第 ' + (index + 1) + ' 条记录' + message); };
       if (!validDate(r?.date)) fail('日期无效');
       if (typeof r.amount !== 'number' || !Number.isInteger(r.amount) || r.amount < 0 || r.amount > 2147483647) fail('数量无效');
+      if (r.amount % 30 !== 0) fail('数量单位无效，1 串应填写 30');
       let created = r.created;
       if (created != null) {
         if (typeof created !== 'string') fail('创建时间无效');

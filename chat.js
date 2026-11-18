@@ -30,7 +30,7 @@ const digest = async value => hex(await crypto.subtle.digest('SHA-256',new TextE
 const bits = value => Uint8Array.from(value.match(/../g), x => parseInt(x,16));
 const params = new URLSearchParams(location.hash.slice(1));
 const isGuest = params.has('room');
-let client, state, storeKey, key, last = 0, reading = false, active = false, pending;
+let client, state, storeKey, key, last = 0, reading = null, active = false, pending;
 function persist(){localStorage.setItem(storeKey,JSON.stringify(state));}
 function rpc(action, extra = {}) {
   return request(state?.group ? 'qinti_group' : 'qinti_chat', {action, ...extra});
@@ -50,6 +50,7 @@ async function request(endpoint, extra, signal) {
   if(!response.ok){
     const error = await response.json().catch(()=>({}));
     if(error.code==='PGRST202') throw Error('聊天服务尚未启用，请联系站点管理员。');
+    if(error.code==='40001')throw Error('邀请状态已变更，请刷新后重试。');
     if(error.message==='Invalid invitation') throw Error('邀请已使用或已过期。');
     if(error.message==='Unauthorized') throw Error('会话已结束或当前浏览器没有访问权限。');
     throw Error('请求失败，请稍后重试。');
@@ -92,56 +93,96 @@ function notifyIncoming(){
     };
   } catch {say('此浏览器暂时无法显示桌面通知。');}
 }
-async function refresh(){
-  if(reading || !active)return;
-  reading=true;
+let firstSeq=0,loadingOlder=false;
+async function messageItem(m){
+  const item=document.createElement('li');
   try{
-    const {messages,joined,title,members}=await rpc('read',{cursor_seq:last});
-    if(!isGuest){el('invite').hidden=!state.group && joined; if(!state.group && joined)el('copyField').hidden=true;}
-    if(state.group){
-      el('chatTitle').textContent=title;
-      el('roomState').textContent='加密群聊 · '+members+' 人';
-    }else el('roomState').textContent = joined ? '加密对话 · 对方已加入' : '加密对话 · 等待好友加入';
-    if (!last && !messages.length) {
-      el('intro').textContent = (state.group ? members>1 : joined) ? '发送第一条消息' : '复制邀请链接发给好友，24 小时内有效。';
+    const packed=bits(m.packet);
+    const text=new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:packed.slice(0,12)},key,packed.slice(12)));
+    if(!renderFile(text,item,key,filePart))item.textContent=text;
+  }
+  catch{item.textContent='此消息无法解密';}
+  if(state.group){
+    const label=document.createElement('span');
+    label.className='sender';
+    label.textContent=m.from_host?'群主':'成员 · '+m.sender;
+    item.prepend(label);
+  }
+  if(state.group ? m.mine : m.from_host===!isGuest)item.className='mine';
+  return item;
+}
+async function loadEarlier(){
+  if(loadingOlder || !firstSeq || el('older').hidden)return;
+  loadingOlder=true;el('older').disabled=true;
+  try{
+    const page=await request('qinti_history',{before_seq:firstSeq});
+    const fragment=document.createDocumentFragment();
+    for(const message of page.messages)fragment.append(await messageItem(message));
+    const height=list.scrollHeight,top=list.scrollTop;
+    list.prepend(fragment);
+    firstSeq=page.messages[0]?.seq ?? firstSeq;
+    el('older').hidden=!page.has_older;
+    list.scrollTop=top+list.scrollHeight-height;
+  }catch(error){say('历史记录加载失败：'+error.message);}
+  finally{loadingOlder=false;el('older').disabled=false;}
+}
+el('older').onclick=loadEarlier;
+list.addEventListener('scroll',()=>{if(list.scrollTop<=2 && !nearLatest())void loadEarlier();});
+function refresh(){
+  if(!active)return Promise.resolve();
+  if(!reading)reading=refreshMessages().finally(()=>{reading=null;});
+  return reading;
+}
+async function refreshMessages(){
+  const initial=!historyLoaded;
+  const page=initial ? await request('qinti_history',{}) : await rpc('read',{cursor_seq:last});
+  const {messages,joined,title,members}=page;
+  if(!isGuest){
+    el('invite').hidden=!state.group && joined;
+    if(!state.group && joined)el('copyField').hidden=true;
+    if(!state.group && !joined){
+      const current=page.invite_valid && page.invite_hash===await digest(state.invite);
+      el('invite').textContent=current?'复制邀请链接':'重新生成邀请';
     }
-    const follow = !last || nearLatest();
-    let incoming = false;
-    for(const m of messages){
-      const item=document.createElement('li');
-      try{
-        const packed=bits(m.packet);
-        const text=new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:packed.slice(0,12)},key,packed.slice(12)));
-        if(!renderFile(text,item,key,filePart))item.textContent=text;
-      }
-      catch{item.textContent='此消息无法解密';}
-      if(state.group){
-        const label=document.createElement('span');
-        label.className='sender';
-        label.textContent=m.from_host?'群主':'成员 · '+m.sender;
-        item.prepend(label);
-      }
-      if(state.group ? m.mine : m.from_host===!isGuest)item.className='mine';
-      else incoming = true;
-      el('messages').append(item); last=m.seq;
-    }
-    if(historyLoaded && incoming && (isGuest || !hostFrame))notifyIncoming();
-    if(messages.length < 100)historyLoaded=true;
-    if(messages.length){
-      el('welcome').hidden = true;
-      if (follow) scrollToLatest();
-      else el('latest').hidden = false;
-    }
-    await acknowledgeVisible();
-  }finally{reading=false;}
+  }
+  if(state.group){
+    el('chatTitle').textContent=title;
+    el('roomState').textContent='加密群聊 · '+members+' 人';
+  }else el('roomState').textContent = joined ? '加密对话 · 对方已加入' : '加密对话 · 等待好友加入';
+  if (!last && !messages.length) {
+    el('intro').textContent = (state.group ? members>1 : joined) ? '发送第一条消息' : '复制邀请链接发给好友，24 小时内有效。';
+  }
+  const follow = !last || nearLatest();
+  let incoming = false;
+  for(const m of messages){
+    const item=await messageItem(m);
+    if(item.className!=='mine')incoming=true;
+    list.append(item);
+    firstSeq ||= m.seq;
+    last=m.seq;
+  }
+  if(historyLoaded && incoming && (isGuest || !hostFrame))notifyIncoming();
+  if(initial)el('older').hidden=!page.has_older;
+  historyLoaded=true;
+  if(messages.length){
+    el('welcome').hidden = true;
+    if (follow) scrollToLatest();
+    else el('latest').hidden = false;
+  }
+  await acknowledgeVisible();
+  if(!el('retryRefresh').hidden){
+    el('retryRefresh').hidden=true;
+    if(el('status').textContent===sentRefreshError)say('已发送');
+  }
 }
 async function openRoom(){
   key=await crypto.subtle.importKey('raw',bits(state.key),'AES-GCM',false,['encrypt','decrypt']);
   if(state.group){el('closeRoom').textContent='解散群聊';el('invite').textContent='邀请群成员';}
-  active=true; await refresh();el('nickField').hidden=true; updateNotifyButton(); el('composer').hidden=false;el('join').hidden=true;el('closeRoom').hidden=isGuest;
+  active=true;el('nickField').hidden=true; updateNotifyButton(); el('composer').hidden=false;el('join').hidden=true;el('closeRoom').hidden=isGuest;
   el('rename').hidden=isGuest;
   el('rename').textContent=state.group?'修改群名称':'修改私聊备注';
   options.hidden = el('notify').hidden && el('closeRoom').hidden;
+  await refresh().catch(error=>say('读取聊天记录失败：'+error.message));
   const savedDraft=sessionStorage.getItem(draftSlot());
   if(savedDraft && !draft.value){
     try{
@@ -533,6 +574,24 @@ click('invite',async()=>{
   if(state.group){
     invite=hex(random(32));
     await rpc('invite',{payload:await digest(invite)});
+  }else{
+    const renewRequested=el('invite').textContent==='重新生成邀请';
+    const info=await rpc('invite_state');
+    if(info.joined){el('invite').hidden=true;say('对方已加入。');return;}
+    if(!info.invite_valid || info.invite_hash!==await digest(invite)){
+      if(!renewRequested){
+        el('invite').textContent='重新生成邀请';say('原邀请已过期或已被替换，请重新生成。');return;
+      }
+      invite=hex(random(32));
+      await rpc('renew_invite',{token:info.invite_hash,payload:await digest(invite)});
+      state.invite=invite;
+      const slot=roomPrefix()+state.room;
+      try{
+        const record=JSON.parse(localStorage.getItem(slot)) || state;
+        localStorage.setItem(slot,JSON.stringify({...record,invite}));
+      }catch{ /* The new link can still be copied from this session. */ }
+      el('invite').textContent='复制邀请链接';
+    }
   }
   const url=inviteURL(invite);
   try{await navigator.clipboard.writeText(url);say(state.group?'已复制一人份邀请链接，邀请下一位请再点一次。':'邀请链接已复制，请私下发给对方。');}
@@ -610,6 +669,15 @@ async function sendPacket(text,id){
   const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,new TextEncoder().encode(text));
   await rpc('send',{payload:hex(iv)+hex(cipher),message_id:id});
 }
+const sentRefreshError='已发送，聊天记录暂未刷新。';
+async function refreshAfterSend(){
+  try{
+    if(reading)await reading.catch(()=>{});
+    await refresh();scrollToLatest();
+  }
+  catch{say(sentRefreshError);el('retryRefresh').hidden=false;}
+}
+el('retryRefresh').onclick=refreshAfterSend;
 el('composer').onsubmit=async e=>{
   e.preventDefault();
   const text=draft.value.trim();
@@ -626,11 +694,11 @@ el('composer').onsubmit=async e=>{
     if(text){
       if(pending?.text!==text)pending={text,id:crypto.randomUUID()};
       await sendPacket(text,pending.id);
-      pending=null;draft.value='';sessionStorage.removeItem(draftSlot());
+      pending=null;draft.value='';try{sessionStorage.removeItem(draftSlot());}catch{}
     }
-    say('');sizeDraft();
-    await refresh();scrollToLatest();
-  }catch(err){say('发送失败：'+err.message+' 可再次点发送。');}
+    say('已发送');sizeDraft();
+    await refreshAfterSend();
+  }catch(err){say('发送尚未确认：'+err.message+' 可再次点发送。');}
   finally{draft.readOnly=false;el('send').disabled=false;el('attach').disabled=false;showQueue();draft.focus();}
 };
 async function start(){
@@ -696,4 +764,4 @@ start().then(async()=>{
   await refreshInbox();
   setInterval(refreshInbox,5000);
 }).catch(e=>say(e.message));
-setInterval(()=>{if(notificationsOn() || (!document.hidden && (!hostFrame || hostFrame.getClientRects().length)))refresh().catch(e=>say(e.message));},3000);
+setInterval(()=>{if(notificationsOn() || (!document.hidden && (!hostFrame || hostFrame.getClientRects().length)))refresh().catch(e=>{if(el('retryRefresh').hidden)say(e.message);});},3000);

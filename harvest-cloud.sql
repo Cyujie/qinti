@@ -10,6 +10,11 @@ begin
     alter table public.harvest_records add constraint harvest_new_amount_positive
       check (amount > 0) not valid;
   end if;
+  if not exists (select 1 from pg_constraint where conrelid = 'public.harvest_records'::regclass
+                 and conname = 'harvest_whole_bunches') then
+    alter table public.harvest_records add constraint harvest_whole_bunches
+      check (amount % 30 = 0) not valid;
+  end if;
 end $$;
 
 create table if not exists public.harvest_checkins (
@@ -30,7 +35,7 @@ create policy checkins_insert on public.harvest_checkins for insert to authentic
 -- 采摘和导入公用一个事务；按文件顺序保留每天第一条正数，历史零串跳过。
 create or replace function public.qinti_save_harvest(p_user uuid, p_rows jsonb)
 returns integer language plpgsql security invoker set search_path = '' as $$
-declare inserted integer;
+declare inserted integer; bad_position bigint;
 begin
   if auth.uid() is null or p_user is distinct from auth.uid() then
     raise exception '账号已变更，请重新提交';
@@ -38,14 +43,15 @@ begin
   if jsonb_typeof(p_rows) is distinct from 'array' then
     raise exception '记录应为数组';
   end if;
-  if exists (
-    select from jsonb_array_elements(p_rows) x
+  select position into bad_position from jsonb_array_elements(p_rows) with ordinality a(x,position)
     where jsonb_typeof(x->'amount') is distinct from 'number'
        or (x->>'amount')::numeric <> trunc((x->>'amount')::numeric)
-       or (x->>'amount')::numeric < 0
+       or mod((x->>'amount')::numeric,30) <> 0
+       or (x->>'amount')::numeric not between 0 and 2147483647
        or coalesce(x->>'date','') !~ '^\d{4}-\d{2}-\d{2}$'
        or (x->>'date')::date is null
-  ) then raise exception '记录日期或数量无效'; end if;
+  order by position limit 1;
+  if found then raise exception '第 % 条记录日期或数量无效，数量应为 0 或 30 的倍数',bad_position; end if;
 
   insert into public.harvest_records (id,user_id,date,kind_name,detail,amount,created)
   select gen_random_uuid()::text,p_user,day,coalesce(item->>'kindName',''),

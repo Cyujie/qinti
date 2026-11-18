@@ -1,5 +1,35 @@
 'use strict';
 
+const STORE_KEY='meal-allowance-records-v1';
+let cachedOwner;
+let memoryRecords=[];
+function loadRecords(){
+  const owner=currentUser?.id || 'guest';
+  if(cachedOwner!==owner){
+    cachedOwner=owner;
+    memoryRecords=[];
+    try{
+      const rows=JSON.parse(localStorage.getItem(STORE_KEY+':'+owner));
+      if(Array.isArray(rows))memoryRecords=rows;
+    }catch{}
+  }
+  return memoryRecords;
+}
+function saveRecords(rows){
+  cachedOwner=currentUser?.id || 'guest';
+  memoryRecords=rows;
+  try{localStorage.setItem(STORE_KEY+':'+cachedOwner,JSON.stringify(rows));}
+  catch{ /* This session still uses the latest cloud snapshot. */ }
+}
+
+window.addEventListener('storage', event => {
+  if (!currentUser || (event.key !== null && event.key !== STORE_KEY+':'+currentUser.id)) return;
+  cachedOwner=undefined;
+  renderRecords();
+  renderAchievements();
+  calc();
+});
+
 let recordsVersion = 0;
 let checkinVersion = 0;
 let checkinOwner = null;
@@ -144,7 +174,8 @@ function updateCloudAccount() {
   checkinDays = new Set();
   checkinBusy = false;
   checkinNotice = '';
-  memoryRecords = [];
+  cachedOwner=undefined;
+  memoryRecords=[];
   visibleRecordCount = 5;
   selectedIds.clear();
   selectionMode = false;

@@ -158,10 +158,7 @@ document.addEventListener('visibilitychange',()=>{
   loadCheckins();
   loadRemoteRecords().catch(e=>{if(currentUser?.id===owner)$('syncStatus').textContent='收获记录加载失败：'+e.message});
 });
-const STORE_KEY='meal-allowance-records-v1';
-let visibleRecordCount=5;
-let memoryRecords=[],selectedIds=new Set(),selectionMode=false;function loadRecords(){try{const rows=JSON.parse(localStorage.getItem(STORE_KEY+':'+(currentUser?.id||'guest'))||'[]');memoryRecords=Array.isArray(rows)?rows:[];return memoryRecords}catch{return memoryRecords}}
-function saveRecords(rows){memoryRecords=rows;try{localStorage.setItem(STORE_KEY+':'+(currentUser?.id||'guest'),JSON.stringify(rows))}catch{}return true}
+let visibleRecordCount=5,selectedIds=new Set(),selectionMode=false;
 function jsonData(){return JSON.stringify({format:'grape-harvest-records',version:1,updatedAt:new Date().toISOString(),records:loadRecords()},null,2)}
 function downloadJSON(){const blob=new Blob([jsonData()],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='青提收获记录.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
 function syncJSON(){const rows=loadRecords();$('syncStatus').textContent=`当前账号共有 ${rows.length} 条收获记录。`;return true}

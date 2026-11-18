@@ -55,6 +55,7 @@
       </details>
       <p id="directoryStatus" role="status"></p>
     </dialog>
+    <button type="button" id="older" hidden>加载更早的消息</button>
     <div class="thread">
       <ul id="messages" aria-label="聊天记录" aria-live="polite"></ul>
       <div class="welcome" id="welcome">
@@ -69,6 +70,7 @@
     <footer>
       <div class="feedback">
         <p id="status" role="status"></p>
+        <button type="button" id="retryRefresh" hidden>刷新记录</button>
         <button id="invite" hidden>复制邀请链接</button>
       </div>
       <input id="copyField" aria-label="邀请链接" readonly hidden>

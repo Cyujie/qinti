@@ -28,16 +28,58 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci-only
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run regression tests
+        run: node --test tests/*.test.cjs
+      - name: Verify database migrations and data rules
+        env:
+          PGHOST: localhost
+          PGUSER: postgres
+          PGPASSWORD: ci-only
+        run: |
+          psql -v ON_ERROR_STOP=1 <<'SQL'
+          create role anon;
+          create role authenticated;
+          create schema auth;
+          create table auth.users (id uuid primary key);
+          create function auth.uid() returns uuid language sql stable as $$
+            select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid
+          $$;
+          insert into auth.users values(gen_random_uuid());
+          SQL
+          for script in supabase-schema.sql harvest-cloud.sql chat-schema.sql chat-attachments.sql chat-groups.sql chat-directory.sql chat-inbox.sql chat-history.sql tests/data-regression.sql; do
+            psql -v ON_ERROR_STOP=1 -f "$script"
+          done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify chat in Chrome
+        run: |
+          python -m pip install playwright==1.55.0
+          python tests/chat_browser.py
+      - name: Prepare website files
+        run: |
+          mkdir site
+          cp index.html chat.html chat.css chat.js chat-media.js chat-recovery.js inbox-host.js harvest-cloud.js harvest-rules.js site/
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          # Upload entire repository
-          path: '.'
+          path: site
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
