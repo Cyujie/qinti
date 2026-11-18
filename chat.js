@@ -108,5 +108,15 @@ async function start(){
     else{say('创建一段私聊，邀请一位朋友加入。');el('create').hidden=false;}
   }
 }
+// Only the signed-in homepage embeds the host view. Invitations open independently.
+const hostFrame = window.parent === window || isGuest || new URL(document.referrer || location.href).origin !== location.origin
+  ? null : window.frameElement;
+if(hostFrame){
+  document.documentElement.classList.add('embedded');
+  const content=document.querySelector('main');
+  new ResizeObserver(()=>{
+    if(content.offsetHeight)hostFrame.style.height=content.offsetHeight+'px';
+  }).observe(content);
+}
 start().catch(e=>say(e.message));
-setInterval(()=>{if(!document.hidden)refresh().catch(e=>say(e.message));},3000);
+setInterval(()=>{if(!document.hidden && (!hostFrame || hostFrame.getClientRects().length))refresh().catch(e=>say(e.message));},3000);
