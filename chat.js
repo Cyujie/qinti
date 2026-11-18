@@ -36,7 +36,7 @@ function rpc(action, extra = {}) {
   return request(state?.group ? 'qinti_group' : 'qinti_chat', {action, ...extra});
 }
 function filePart(extra) { return request('qinti_chat_part', extra); }
-async function request(endpoint, extra) {
+async function request(endpoint, extra, signal) {
   let authorization = {};
   if (!isGuest) {
     const session = (await client.auth.getSession()).data.session;
@@ -44,7 +44,7 @@ async function request(endpoint, extra) {
     authorization.Authorization = 'Bearer ' + session.access_token;
   }
   const response = await fetch(api+'/rest/v1/rpc/'+endpoint,{
-    method:'POST',headers:{apikey:publishableKey,'Content-Type':'application/json',...authorization},
+    method:'POST',signal,headers:{apikey:publishableKey,'Content-Type':'application/json',...authorization},
     body:JSON.stringify({room:state.room,token:isGuest?state.guest:'',...extra})
   });
   if(!response.ok){
@@ -64,12 +64,15 @@ function notificationsOn(){
 function updateNotifyButton(){
   el('notify').hidden = !active || !window.Notification;
   el('notify').textContent = notificationsOn() ? '关闭桌面通知' : '开启桌面通知';
+  el('inboxNotify').hidden = isGuest || !window.Notification;
+  el('inboxNotify').textContent = el('notify').textContent;
 }
+el('inboxNotify').onclick=()=>el('notify').click();
 click('notify', async () => {
   if(notificationsOn()) localStorage.removeItem(notificationsKey());
   else {
     const permission = await Notification.requestPermission();
-    if(permission !== 'granted'){say('要接收通知，请在浏览器的网站权限中允许通知。');return;}
+    if(permission !== 'granted'){const msg='请在浏览器的网站权限中允许通知。';say(msg);el('directoryStatus').textContent=msg;return;}
     localStorage.setItem(notificationsKey(),'1');
   }
   updateNotifyButton();
@@ -122,13 +125,14 @@ async function refresh(){
       else incoming = true;
       el('messages').append(item); last=m.seq;
     }
-    if(historyLoaded && incoming)notifyIncoming();
+    if(historyLoaded && incoming && (isGuest || !hostFrame))notifyIncoming();
     if(messages.length < 100)historyLoaded=true;
     if(messages.length){
       el('welcome').hidden = true;
       if (follow) scrollToLatest();
       else el('latest').hidden = false;
     }
+    await acknowledgeVisible();
   }finally{reading=false;}
 }
 async function openRoom(){
@@ -307,9 +311,106 @@ async function syncDirectory(){
   }).finally(()=>{refreshing=null;el('refreshDirectory').disabled=false;renderDirectory();});
   return refreshing;
 }
+const activity = new Map();
+const previews = new Map();
+let pendingRoom = '', acknowledged = 0, polling = false, acknowledging = false;
+
+function viewedRoom(){
+  const page=hostFrame?.ownerDocument || document;
+  return active && !document.hidden && page.hasFocus() && (!hostFrame || hostFrame.getClientRects().length) &&
+    !el('directory').open && !el('renameDialog').open ? state.room : null;
+}
+async function acknowledgeVisible(){
+  if(isGuest || acknowledging || !last || last<=acknowledged || !viewedRoom() || !nearLatest())return;
+  acknowledging=true;
+  const seq=last;
+  try{
+    await directoryRequest({p_room:state.room,p_seq:seq},'qinti_mark_read');
+    acknowledged=seq;
+    if(activity.get(state.room)?.unread)void refreshInbox();
+  }catch{ /* The next visible refresh retries the same cursor. */ }
+  finally{acknowledging=false;}
+}
+async function enterConversation(room){
+  const record=hostRooms().find(r=>r.room===room);
+  if(!record){
+    pendingRoom=room;
+    if(!el('directory').open)showDirectory();
+    await syncDirectory();
+    if(hostRooms().some(r=>r.room===room) && pendingRoom===room)return enterConversation(room);
+    const entry=cloud?.rooms.find(r=>r.room===room);
+    if(!entry){el('directoryStatus').textContent='此会话暂不可用，请刷新列表。';return;}
+    el('backupSettings').open=true;
+    el('directoryStatus').textContent=entry.envelope?'解锁后将直接打开此会话。':'请先在原设备备份此会话密钥。';
+    if(!el('recoveryInput').hidden)el('recoveryInput').focus();
+    return;
+  }
+  pendingRoom='';
+  if(active && state.room===room){
+    if(el('directory').open)el('directory').close();
+    el('draft').focus();await refresh();return;
+  }
+  if(!await canLeaveRoom())return;
+  rememberSelection(room);
+  sessionStorage.setItem(storeKey+':open-once',room);
+  location.reload();
+}
+async function handleNotificationTarget(){
+  const target=hostFrame?.dataset.targetRoom;
+  if(!target)return;
+  delete hostFrame.dataset.targetRoom;
+  await enterConversation(target);
+}
+async function loadPreview(record,seq){
+  const previous=previews.get(record.room);
+  if(previous?.seq===seq)return;
+  const response=await request(record.group?'qinti_group':'qinti_chat',{room:record.room,action:'read',cursor_seq:seq-1},AbortSignal.timeout(10000));
+  const message=response.messages.find(item=>item.seq===seq);
+  if(!message)return;
+  const bytes=bits(message.packet);
+  const roomKey=await crypto.subtle.importKey('raw',bits(record.key),'AES-GCM',false,['decrypt']);
+  const clear=new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:bytes.slice(0,12)},roomKey,bytes.slice(12)));
+  const text=clear.startsWith('\0qinti-file-v1:')?'[附件]':clear.replace(/\s+/g,' ').slice(0,80);
+  previews.set(record.room,{seq,text});
+}
+async function refreshInbox(){
+  if(isGuest || !storeKey || polling)return;
+  polling=true;
+  try{
+    const rows=await directoryRequest({},'qinti_inbox');
+    if(hostFrame && !hostFrame.isConnected)return;
+    let changed=rows.length!==activity.size;
+    const current=new Set(rows.map(r=>r.room));
+    for(const id of activity.keys())if(!current.has(id)){activity.delete(id);previews.delete(id);}
+    for(const r of rows){
+      const old=activity.get(r.room);
+      if(!old || old.last_seq!==r.last_seq || old.unread!==r.unread)changed=true;
+      activity.set(r.room,r);
+    }
+    hostFrame?.dispatchEvent(new CustomEvent('qinti-inbox',{detail:{rows,viewing:viewedRoom(),notify:notificationsOn()}}));
+    el('inboxError').hidden=true;
+    if(el('directory').open && !document.hidden && (!hostFrame || hostFrame.getClientRects().length)){
+      if(!cloud || cloud.rooms.length!==rows.length || cloud.rooms.some(r=>!current.has(r.room)))await syncDirectory();
+      if(changed)renderDirectory();
+      const local=new Map(hostRooms().map(r=>[r.room,r]));
+      const needed=rows.filter(r=>r.last_seq && local.has(r.room) && previews.get(r.room)?.seq!==r.last_seq);
+      // Bound the number of concurrent reads when an account has many conversations.
+      for(let i=0;i<needed.length;i+=4){
+        await Promise.allSettled(needed.slice(i,i+4).map(r=>loadPreview(local.get(r.room),r.last_seq)));
+      }
+      if(needed.length && el('directory').open)renderDirectory();
+    }
+  }catch{
+    el('inboxError').textContent='未读提醒暂未同步，正在重试。';el('inboxError').hidden=false;
+  }finally{polling=false;}
+}
+list.addEventListener('scroll',acknowledgeVisible);
+window.addEventListener('focus',acknowledgeVisible);
 function renderDirectory(){
   const local=new Map(hostRooms().map(record=>[record.room,record]));
-  const entries=cloud ? cloud.rooms : [...local.values()];
+  const entries=[...(cloud ? cloud.rooms : local.values())].sort((a,b)=>
+    (activity.get(b.room)?.last_seq||0)-(activity.get(a.room)?.last_seq||0) ||
+    new Date(b.created||0)-new Date(a.created||0));
   const filter=el('roomSearch').value.trim().toLocaleLowerCase();
   const rows=[];
   for(const entry of entries){
@@ -323,20 +424,23 @@ function renderDirectory(){
     const detail=document.createElement('small');
     detail.textContent=!cloud?'本机缓存':record?(entry.envelope?'云端 · 已备份密钥':'云端 · 本机可打开')
       :entry.envelope?'云端 · 需恢复码':'云端 · 等待原设备备份密钥';
-    button.append(heading,detail);
+    const info=activity.get(entry.room);
+    if(record && previews.has(entry.room))detail.textContent=previews.get(entry.room).text;
+    const time=document.createElement('time');
+    if(info?.last_at){
+      const stamp=new Date(info.last_at);
+      time.dateTime=info.last_at;
+      time.textContent=stamp.toLocaleDateString()===new Date().toLocaleDateString()
+        ?stamp.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):stamp.toLocaleDateString('zh-CN');
+    }
+    button.append(heading,time,detail);
+    if(info?.unread){
+      const count=document.createElement('span');count.className='room-unread';
+      count.textContent=info.unread>99?'99+':info.unread;count.setAttribute('aria-label',info.unread+' 条未读');button.append(count);
+    }
     button.setAttribute('aria-current',String(entry.room===state.room));
-    button.onclick=async()=>{
-      if(!record){
-        el('backupSettings').open=true;
-        el('directoryStatus').textContent=entry.envelope?'输入恢复码即可打开此会话。':'请先在有此会话记录的原设备启用加密备份。';
-        if(!el('recoveryInput').hidden)el('recoveryInput').focus();
-        return;
-      }
-      if(record.room===state.room){el('directory').close();return;}
-      if(!await canLeaveRoom())return;
-      rememberSelection(record.room);
-      location.reload();
-    };
+    button.dataset.room=entry.room;
+    button.onclick=()=>enterConversation(entry.room);
     rows.push(button);
   }
   el('rooms').replaceChildren(...rows);
@@ -366,6 +470,7 @@ el('backupAction').onclick=async()=>{
     if(!entering && el('directory').open){el('recoveryOutput').value=code;el('recoveryOutput').hidden=false;el('recoveryOutput').select();}
     el('directoryStatus').textContent='';
     await syncDirectory();
+    if(pendingRoom && hostRooms().some(r=>r.room===pendingRoom))await enterConversation(pendingRoom);
   }catch(err){el('directoryStatus').textContent=err.message;}
   finally{backupBusy=false;el('backupAction').disabled=false;}
 };
@@ -376,9 +481,11 @@ el('directory').addEventListener('close',()=>{
 function showDirectory(){
   el('directoryStatus').textContent='';
   el('roomSearch').value='';
-  el('newRoomDetails').open=!state.room && !(cloud?.rooms.length || hostRooms().length);
+  el('newRoomDetails').open=false;
   renderDirectory();
-  el('directory').showModal();
+  if(!el('directory').open)el('directory').show();
+  el('dismissDirectory').hidden=!active;
+  updateNotifyButton();
   syncDirectory();
 }
 el('chooseRoom').onclick=el('create').onclick=showDirectory;
@@ -409,6 +516,7 @@ el('newRoomForm').onsubmit=async e=>{
     try{await request(endpoint,{action:'create',room:newCandidate.room,payload:newCandidate.group?newCandidate.label:await digest(newCandidate.invite)});}
     catch(err){try{await request(endpoint,{action:'read',room:newCandidate.room});}catch{throw err;}}
     localStorage.setItem(roomPrefix()+newCandidate.room,JSON.stringify(newCandidate));
+    sessionStorage.setItem(storeKey+':open-once',newCandidate.room);
     rememberSelection(newCandidate.room);
     location.reload();
   }catch(err){el('directoryStatus').textContent=err.message;}
@@ -552,18 +660,18 @@ async function start(){
       localStorage.setItem(roomPrefix()+saved.room,JSON.stringify(saved));
       rememberSelection(saved.room);
     }
-    const rooms=hostRooms();
-    const selected=rooms.find(r=>r.room===sessionStorage.getItem(storeKey))
-      || rooms.find(r=>r.room===saved?.selectedRoom) || rooms[0];
+    const once=sessionStorage.getItem(storeKey+':open-once');
+    sessionStorage.removeItem(storeKey+':open-once');
+    const selected=once && hostRooms().find(r=>r.room===once);
     el('chooseRoom').hidden=false;
-    syncDirectory();
+    if(selected)syncDirectory();
     if(selected){
       state=selected;
       sessionStorage.setItem(storeKey,state.room);
       el('chatTitle').textContent=roomLabel(state);
       await openRoom();
     }
-    else{say('创建会话，邀请好友加入。');el('create').hidden=false;}
+    else{showDirectory();}
   }
 }
 // Only the signed-in homepage embeds the host view. Invitations open independently.
@@ -578,14 +686,14 @@ if(hostFrame){
   observer.observe(parentRoot,{attributes:true,attributeFilter:['data-theme']});
   window.addEventListener('pagehide', event => { if(!event.persisted)observer.disconnect(); });
 }
-start().then(()=>{
-  if (!hostFrame || !state?.owner) return;
-  // The host may preload a hidden frame for notifications.
-  const firstVisit = new IntersectionObserver(entries=>{
-    if (!entries.some(entry=>entry.isIntersecting)) return;
-    firstVisit.disconnect();
-    if (!el('directory').open) showDirectory();
-  });
-  firstVisit.observe(document.documentElement);
+start().then(async()=>{
+  if(isGuest || !state?.owner)return;
+  if(hostFrame){
+    hostFrame.addEventListener('qinti-open-room',handleNotificationTarget);
+    window.addEventListener('pagehide',()=>hostFrame.removeEventListener('qinti-open-room',handleNotificationTarget),{once:true});
+    await handleNotificationTarget();
+  }
+  await refreshInbox();
+  setInterval(refreshInbox,5000);
 }).catch(e=>say(e.message));
 setInterval(()=>{if(notificationsOn() || (!document.hidden && (!hostFrame || hostFrame.getClientRects().length)))refresh().catch(e=>say(e.message));},3000);

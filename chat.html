@@ -34,16 +34,7 @@
     </dialog>
     <dialog id="directory" aria-labelledby="directoryTitle">
       <div class="directory-head"><h2 id="directoryTitle">会话列表</h2><button id="dismissDirectory" class="icon" aria-label="关闭会话列表">×</button></div>
-      <div class="sync-line"><p id="cloudStatus" role="status"></p><button type="button" id="refreshDirectory">刷新</button></div>
-      <input id="roomSearch" type="search" placeholder="搜索会话名称" aria-label="搜索会话名称">
-      <div id="rooms"></div>
-      <details id="backupSettings">
-        <summary>跨设备恢复</summary>
-        <p id="backupHint"></p>
-        <input id="recoveryInput" type="password" autocomplete="off" spellcheck="false" aria-label="恢复码" placeholder="粘贴恢复码" hidden>
-        <button type="button" id="backupAction" hidden></button>
-        <input id="recoveryOutput" readonly aria-label="请私下保存恢复码" hidden>
-      </details>
+      <div class="sync-line"><p id="cloudStatus" role="status"></p><button type="button" id="inboxNotify" hidden>开启桌面通知</button><button type="button" id="refreshDirectory">刷新</button></div>
       <details id="newRoomDetails"><summary>新建会话</summary>
       <form id="newRoomForm">
         <label for="roomType">会话类型</label>
@@ -52,6 +43,15 @@
         <input id="roomName" maxlength="40" placeholder="例如：周末采摘">
         <button class="primary" id="newRoom">新建私聊</button>
       </form>
+      </details>
+      <input id="roomSearch" type="search" placeholder="搜索会话名称" aria-label="搜索会话名称">
+      <p id="inboxError" role="status" hidden></p><div id="rooms"></div>
+      <details id="backupSettings">
+        <summary>跨设备恢复</summary>
+        <p id="backupHint"></p>
+        <input id="recoveryInput" type="password" autocomplete="off" spellcheck="false" aria-label="恢复码" placeholder="粘贴恢复码" hidden>
+        <button type="button" id="backupAction" hidden></button>
+        <input id="recoveryOutput" readonly aria-label="请私下保存恢复码" hidden>
       </details>
       <p id="directoryStatus" role="status"></p>
     </dialog>
