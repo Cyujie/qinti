@@ -71,3 +71,19 @@ footer:has(#composer[hidden]):has(#status:empty):has(#invite[hidden]) { display:
 #queued img { width:32px; height:32px; object-fit:cover; border-radius:5px; vertical-align:middle; margin-right:.4rem; }
 @media(max-width:520px){header,footer{padding-inline:.55rem;}.back{width:32px;}}
 
+
+.identity { min-width:0; }
+.identity h1 { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#chooseRoom { flex:none; color:var(--blue); padding:.5rem; border-radius:10px; }
+#directory { width:min(26rem,calc(100% - 2rem)); max-height:85%; padding:1rem; color:var(--ink); background:var(--surface); border:1px solid var(--line); border-radius:16px; }
+#directory::backdrop { background:#15263166; }
+.directory-head { display:flex; align-items:center; justify-content:space-between; }
+.directory-head h2 { margin:0; font-size:1.15rem; }
+#rooms { max-height:34vh; overflow:auto; }
+#rooms button { width:100%; text-align:left; padding:.65rem; border-radius:8px; overflow-wrap:anywhere; }
+#rooms button[aria-current="true"] { color:var(--blue); background:var(--line); }
+#newRoomForm { display:grid; gap:.5rem; margin-top:.8rem; }
+#newRoomForm label { color:var(--muted); font-size:.85rem; }
+#roomName { width:100%; background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:.55rem; }
+#newRoom { padding:.6rem; }
+#directoryStatus:empty { display:none; }

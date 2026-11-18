@@ -12,7 +12,8 @@
     <header>
       <a class="back icon" href="./" aria-label="返回青提首页" title="返回青提首页">‹</a>
       <span class="avatar" aria-hidden="true"><i></i></span>
-      <div class="identity"><h1>青提私聊</h1><small id="roomState">加密对话</small></div>
+      <div class="identity"><h1 id="chatTitle">青提私聊</h1><small id="roomState">加密对话</small></div>
+      <button type="button" id="chooseRoom" hidden>会话列表</button>
       <details id="options" hidden>
         <summary class="icon" aria-label="聊天选项" title="聊天选项">•••</summary>
         <div class="menu">
@@ -21,6 +22,16 @@
         </div>
       </details>
     </header>
+    <dialog id="directory" aria-labelledby="directoryTitle">
+      <div class="directory-head"><h2 id="directoryTitle">会话列表</h2><button id="dismissDirectory" class="icon" aria-label="关闭会话列表">×</button></div>
+      <div id="rooms"></div>
+      <form id="newRoomForm">
+        <label for="roomName">新会话备注（仅自己可见）</label>
+        <input id="roomName" maxlength="40" placeholder="例如：周末采摘">
+        <button class="primary" id="newRoom">新建私聊</button>
+      </form>
+      <p id="directoryStatus" role="status"></p>
+    </dialog>
     <div class="thread">
       <ul id="messages" aria-label="聊天记录" aria-live="polite"></ul>
       <div class="welcome" id="welcome">

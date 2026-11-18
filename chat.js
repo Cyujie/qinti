@@ -127,9 +127,73 @@ async function openRoom(){
   options.hidden = el('notify').hidden && el('closeRoom').hidden;
 }
 function click(id,callback){el(id).onclick=async()=>{el(id).disabled=true;try{await callback();}catch(e){say(e.message);}finally{el(id).disabled=false;}};}
-click('create',async()=>{
-  state={owner:state.owner,room:crypto.randomUUID(),key:hex(random(32)),invite:hex(random(32))};
-  await rpc('create',{payload:await digest(state.invite)});persist();el('create').hidden=true;await openRoom();
+// Each room has its own key record. Only the selected room ID is shared across reloads.
+const roomPrefix = () => storeKey + ':room:';
+function hostRooms(){
+  return Object.keys(localStorage).filter(k=>k.startsWith(roomPrefix()))
+    .map(k=>JSON.parse(localStorage.getItem(k)))
+    .filter(r=>r?.owner===state.owner && r.room && r.key)
+    .sort((a,b)=>(b.created || 0)-(a.created || 0));
+}
+function roomLabel(room){return room.label || '私聊 · ' + room.room.slice(0,6);}
+function rememberSelection(id){
+  sessionStorage.setItem(storeKey,id);
+  localStorage.setItem(storeKey,JSON.stringify({selectedRoom:id}));
+}
+function canLeaveRoom(){
+  if(el('send').disabled || el('closeRoom').disabled){
+    el('directoryStatus').textContent='请等待当前操作完成。';
+    return false;
+  }
+  return (!draft.value && !queue.length) || confirm('离开后会清空当前未发送的内容，继续吗？');
+}
+function renderDirectory(){
+  const rows=hostRooms().map(room=>{
+    const button=document.createElement('button');
+    button.type='button';
+    button.textContent=roomLabel(room);
+    button.setAttribute('aria-current',String(room.room===state.room));
+    button.onclick=()=>{
+      if(room.room===state.room){el('directory').close();return;}
+      if(!canLeaveRoom())return;
+      rememberSelection(room.room);
+      location.reload();
+    };
+    return button;
+  });
+  el('rooms').replaceChildren(...rows);
+}
+function showDirectory(){
+  el('directoryStatus').textContent='';
+  renderDirectory();
+  el('directory').showModal();
+  if(!state.room)el('roomName').focus();
+}
+el('chooseRoom').onclick=el('create').onclick=showDirectory;
+el('dismissDirectory').onclick=()=>el('directory').close();
+el('directory').addEventListener('cancel',e=>{if(el('newRoom').disabled)e.preventDefault();});
+let newCandidate;
+el('newRoomForm').onsubmit=async e=>{
+  e.preventDefault();
+  if(el('newRoom').disabled || !canLeaveRoom())return;
+  el('newRoom').disabled=el('dismissDirectory').disabled=true;
+  el('rooms').inert=true;
+  try{
+    newCandidate ||= {owner:state.owner,room:crypto.randomUUID(),key:hex(random(32)),invite:hex(random(32)),created:Date.now()};
+    newCandidate.label=el('roomName').value.trim();
+    // Retrying after an interrupted response can recover the room already created.
+    try{await rpc('create',{room:newCandidate.room,payload:await digest(newCandidate.invite)});}
+    catch(err){try{await rpc('read',{room:newCandidate.room});}catch{throw err;}}
+    localStorage.setItem(roomPrefix()+newCandidate.room,JSON.stringify(newCandidate));
+    rememberSelection(newCandidate.room);
+    location.reload();
+  }catch(err){el('directoryStatus').textContent=err.message;}
+  finally{el('newRoom').disabled=el('dismissDirectory').disabled=false;el('rooms').inert=false;}
+};
+window.addEventListener('storage',e=>{
+  if(isGuest || !storeKey || !e.key?.startsWith(roomPrefix()))return;
+  if(e.key===roomPrefix()+state.room && e.newValue===null){location.reload();return;}
+  if(el('directory').open)renderDirectory();
 });
 click('invite',async()=>{
   const url=inviteURL();
@@ -145,7 +209,16 @@ click('join',async()=>{
 });
 click('closeRoom',async()=>{
   if(!confirm('结束私聊并删除这段对话的所有消息？'))return;
-  await rpc('close');active=false;localStorage.removeItem(storeKey);location.reload();
+  await rpc('close');active=false;
+  localStorage.removeItem(roomPrefix()+state.room);
+  sessionStorage.removeItem(storeKey);
+  const saved=JSON.parse(localStorage.getItem(storeKey));
+  if(saved?.selectedRoom===state.room){
+    const next=hostRooms()[0];
+    if(next)rememberSelection(next.room);
+    else localStorage.removeItem(storeKey);
+  }
+  location.reload();
 });
 const queue = [];
 const draft = el('draft');
@@ -236,8 +309,22 @@ async function start(){
     const user=(await client.auth.getSession()).data.session?.user;
     if(!user)throw Error('请从青提首页登录后创建邀请。收到邀请可直接打开链接。');
     storeKey='qinti-chat-host:'+user.id;
-    state=JSON.parse(localStorage.getItem(storeKey))||{owner:user.id};
-    if(state.room)await openRoom();
+    state={owner:user.id};
+    const saved=JSON.parse(localStorage.getItem(storeKey));
+    if(saved?.room && saved.owner===user.id && saved.key){
+      localStorage.setItem(roomPrefix()+saved.room,JSON.stringify(saved));
+      rememberSelection(saved.room);
+    }
+    const rooms=hostRooms();
+    const selected=rooms.find(r=>r.room===sessionStorage.getItem(storeKey))
+      || rooms.find(r=>r.room===saved?.selectedRoom) || rooms[0];
+    el('chooseRoom').hidden=false;
+    if(selected){
+      state=selected;
+      sessionStorage.setItem(storeKey,state.room);
+      el('chatTitle').textContent=roomLabel(state);
+      await openRoom();
+    }
     else{say('创建一段私聊，邀请一位朋友加入。');el('create').hidden=false;}
   }
 }
